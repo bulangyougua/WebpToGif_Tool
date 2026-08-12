@@ -13,7 +13,7 @@ import tkinter as tk
 from tkinter import filedialog, scrolledtext, messagebox
 
 MAX_SIZE = 1024
-VERSION = "V1.0.1"
+VERSION = "V1.1.0"
 
 
 def resize_if_needed(img: Image.Image) -> tuple[Image.Image, str | None]:
@@ -77,10 +77,66 @@ def convert_webp_to_gif(input_path: str, output_path: str) -> str | None:
     return resize_note
 
 
+def convert_webp_to_png(input_path: str, output_path: str) -> str | None:
+    """将单个 WebP 文件转换为 PNG，若发生缩放则返回说明文字"""
+    output_file = Path(output_path)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    resize_note = None
+
+    with Image.open(input_path) as img:
+        is_animated = getattr(img, "is_animated", False)
+        n_frames = getattr(img, "n_frames", 1)
+
+        if is_animated and n_frames > 1:
+            # 动图只取第一帧转为 PNG
+            img.seek(0)
+            frame, note = resize_if_needed(img.convert("RGBA"))
+            if note:
+                resize_note = note
+            frame.save(output_file, "PNG")
+        else:
+            if img.mode in ("RGBA", "P"):
+                img, resize_note = resize_if_needed(img.convert("RGBA"))
+            else:
+                img, resize_note = resize_if_needed(img.convert("RGB"))
+            img.save(output_file, "PNG")
+
+    return resize_note
+
+
+def extract_webp_frames(input_path: str, output_dir: str) -> tuple[int, str | None]:
+    """将动图 WebP 的每一帧提取为单独的 PNG 文件，返回 (帧数, 缩放说明)"""
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    resize_note = None
+    stem = Path(input_path).stem
+
+    with Image.open(input_path) as img:
+        is_animated = getattr(img, "is_animated", False)
+        n_frames = getattr(img, "n_frames", 1)
+
+        if not is_animated or n_frames <= 1:
+            # 静态图直接保存一帧
+            frame, note = resize_if_needed(img.convert("RGBA"))
+            if note:
+                resize_note = note
+            frame.save(out_dir / f"{stem}_001.png", "PNG")
+            return 1, resize_note
+
+        for frame_idx in range(n_frames):
+            img.seek(frame_idx)
+            frame, note = resize_if_needed(img.convert("RGBA"))
+            if note:
+                resize_note = note
+            frame.save(out_dir / f"{stem}_{frame_idx + 1:03d}.png", "PNG")
+
+    return n_frames, resize_note
+
+
 class ConverterApp:
     def __init__(self, root: tk.Tk, initial_paths: list[str] = None):
         self.root = root
-        self.root.title("WebP to GIF 转换器")
+        self.root.title("WebP 转换器")
         self.root.geometry("600x400")
         self.root.minsize(500, 300)
 
@@ -92,6 +148,30 @@ class ConverterApp:
 
         self.select_btn = tk.Button(self.btn_frame, text="选择文件夹", command=self.select_folders, font=("Microsoft YaHei", 10))
         self.select_btn.pack(side=tk.LEFT, padx=5)
+
+        self.option_frame = tk.Frame(root)
+        self.option_frame.pack(pady=5)
+
+        self.gif_var = tk.BooleanVar(value=True)
+        self.gif_cb = tk.Checkbutton(
+            self.option_frame, text="转换为 GIF", variable=self.gif_var,
+            font=("Microsoft YaHei", 10),
+        )
+        self.gif_cb.pack(side=tk.LEFT, padx=10)
+
+        self.png_var = tk.BooleanVar(value=False)
+        self.png_cb = tk.Checkbutton(
+            self.option_frame, text="转换为 PNG（动图只取第一帧）", variable=self.png_var,
+            font=("Microsoft YaHei", 10),
+        )
+        self.png_cb.pack(side=tk.LEFT, padx=10)
+
+        self.split_var = tk.BooleanVar(value=False)
+        self.split_cb = tk.Checkbutton(
+            self.option_frame, text="拆分帧（提取动图每一帧）", variable=self.split_var,
+            font=("Microsoft YaHei", 10),
+        )
+        self.split_cb.pack(side=tk.LEFT, padx=10)
 
         self.bottom_frame = tk.Frame(root)
         self.bottom_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=5)
@@ -134,14 +214,23 @@ class ConverterApp:
         if folder:
             self.process_paths([folder])
 
+    def _set_cb_state(self, state: str) -> None:
+        self.gif_cb.config(state=state)
+        self.png_cb.config(state=state)
+        self.split_cb.config(state=state)
+
     def process_paths(self, paths: list[str]) -> None:
         self.select_btn.config(state=tk.DISABLED)
+        self._set_cb_state(tk.DISABLED)
         thread = threading.Thread(target=self._run_conversion, args=(paths,), daemon=True)
         thread.start()
 
     def _run_conversion(self, paths: list[str]) -> None:
         total_success = 0
         total_fail = 0
+        do_gif = self.gif_var.get()
+        do_png = self.png_var.get()
+        do_split = self.split_var.get()
 
         for folder_path in paths:
             folder_path = folder_path.strip('"')
@@ -152,7 +241,7 @@ class ConverterApp:
                 continue
 
             self.root.after(0, lambda p=folder_path: self.log(f"处理文件夹: {p}"))
-            output_dir = dir_path / "newgif"
+
             webp_files = sorted(
                 {p.resolve() for p in dir_path.iterdir() if p.is_file() and p.suffix.lower() == ".webp"}
             )
@@ -162,23 +251,61 @@ class ConverterApp:
                 continue
 
             for webp_file in webp_files:
-                output_file = output_dir / webp_file.with_suffix(".gif").name
-                try:
-                    resize_note = convert_webp_to_gif(str(webp_file), str(output_file))
-                    self.root.after(0, lambda f=webp_file.name: self.log(f"[OK] {f}"))
-                    if resize_note:
-                        self.root.after(0, lambda msg=resize_note: self.log_red(msg))
+                file_ok = True
+
+                if do_gif:
+                    try:
+                        output_dir = dir_path / "newgif"
+                        output_file = output_dir / webp_file.with_suffix(".gif").name
+                        resize_note = convert_webp_to_gif(str(webp_file), str(output_file))
+                        self.root.after(0, lambda f=webp_file.name: self.log(f"[GIF] {f}"))
+                        if resize_note:
+                            self.root.after(0, lambda msg=resize_note: self.log_red(msg))
+                    except Exception as e:
+                        self.root.after(0, lambda f=webp_file.name, err=e: self.log(f"[FAIL-GIF] {f}: {err}"))
+                        file_ok = False
+
+                if do_png:
+                    try:
+                        output_dir = dir_path / "newpng"
+                        output_file = output_dir / webp_file.with_suffix(".png").name
+                        resize_note = convert_webp_to_png(str(webp_file), str(output_file))
+                        self.root.after(0, lambda f=webp_file.name: self.log(f"[PNG] {f}"))
+                        if resize_note:
+                            self.root.after(0, lambda msg=resize_note: self.log_red(msg))
+                    except Exception as e:
+                        self.root.after(0, lambda f=webp_file.name, err=e: self.log(f"[FAIL-PNG] {f}: {err}"))
+                        file_ok = False
+
+                if do_split:
+                    try:
+                        output_dir = dir_path / "frames"
+                        sub_dir = output_dir / webp_file.stem
+                        n_frames, resize_note = extract_webp_frames(str(webp_file), str(sub_dir))
+                        self.root.after(0, lambda f=webp_file.name, n=n_frames: self.log(f"[SPLIT] {f} -> {n} 帧"))
+                        if resize_note:
+                            self.root.after(0, lambda msg=resize_note: self.log_red(msg))
+                    except Exception as e:
+                        self.root.after(0, lambda f=webp_file.name, err=e: self.log(f"[FAIL-SPLIT] {f}: {err}"))
+                        file_ok = False
+
+                if file_ok:
                     total_success += 1
-                except Exception as e:
-                    self.root.after(0, lambda f=webp_file.name, err=e: self.log(f"[FAIL] {f}: {err}"))
+                else:
                     total_fail += 1
 
-            self.root.after(0, lambda p=output_dir: self.log(f"[INFO] 输出目录: {p}"))
+            if do_gif:
+                self.root.after(0, lambda p=dir_path / "newgif": self.log(f"[INFO] GIF 输出: {p}"))
+            if do_png:
+                self.root.after(0, lambda p=dir_path / "newpng": self.log(f"[INFO] PNG 输出: {p}"))
+            if do_split:
+                self.root.after(0, lambda p=dir_path / "frames": self.log(f"[INFO] 帧输出: {p}"))
             self.root.after(0, self.log, "")
 
         def finish():
             self.set_status(f"完成：成功 {total_success} 个，失败 {total_fail} 个")
             self.select_btn.config(state=tk.NORMAL)
+            self._set_cb_state(tk.NORMAL)
             if total_fail > 0:
                 messagebox.showwarning("转换完成", f"成功 {total_success} 个，失败 {total_fail} 个\n请查看日志了解失败文件")
             else:

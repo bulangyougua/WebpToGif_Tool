@@ -2,7 +2,8 @@
 
 if "%~1"=="" (
     echo Drag folders onto this script
-    echo WebP files will be converted to GIF in a newgif subfolder
+    echo WebP files will be converted to GIF/PNG or split into frames
+    echo Options available in the GUI window
     pause
     exit /b
 )
