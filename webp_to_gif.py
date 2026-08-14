@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-WebP to GIF Converter
+WebP/GIF Converter
 带图形界面，支持双击运行和拖拽文件夹
+支持 WebP 和 GIF 格式的转换与帧提取
 """
 
 import sys
@@ -13,7 +14,7 @@ import tkinter as tk
 from tkinter import filedialog, scrolledtext, messagebox
 
 MAX_SIZE = 1024
-VERSION = "V1.1.0"
+VERSION = "V1.2.0"
 
 
 def resize_if_needed(img: Image.Image) -> tuple[Image.Image, str | None]:
@@ -104,8 +105,8 @@ def convert_webp_to_png(input_path: str, output_path: str) -> str | None:
     return resize_note
 
 
-def extract_webp_frames(input_path: str, output_dir: str) -> tuple[int, str | None]:
-    """将动图 WebP 的每一帧提取为单独的 PNG 文件，返回 (帧数, 缩放说明)"""
+def extract_frames(input_path: str, output_dir: str) -> tuple[int, str | None]:
+    """将动图（WebP 或 GIF）的每一帧提取为单独的 PNG 文件，返回 (帧数, 缩放说明)"""
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     resize_note = None
@@ -136,11 +137,11 @@ def extract_webp_frames(input_path: str, output_dir: str) -> tuple[int, str | No
 class ConverterApp:
     def __init__(self, root: tk.Tk, initial_paths: list[str] = None):
         self.root = root
-        self.root.title("WebP 转换器")
+        self.root.title("WebP/GIF 转换器")
         self.root.geometry("600x400")
         self.root.minsize(500, 300)
 
-        self.label = tk.Label(root, text="选择一个或多个文件夹，转换其中的 webp 文件", font=("Microsoft YaHei", 11))
+        self.label = tk.Label(root, text="选择一个或多个文件夹，转换其中的 webp/gif 文件", font=("Microsoft YaHei", 11))
         self.label.pack(pady=10)
 
         self.btn_frame = tk.Frame(root)
@@ -242,15 +243,15 @@ class ConverterApp:
 
             self.root.after(0, lambda p=folder_path: self.log(f"处理文件夹: {p}"))
 
-            webp_files = sorted(
-                {p.resolve() for p in dir_path.iterdir() if p.is_file() and p.suffix.lower() == ".webp"}
+            supported_files = sorted(
+                {p.resolve() for p in dir_path.iterdir() if p.is_file() and p.suffix.lower() in (".webp", ".gif")}
             )
 
-            if not webp_files:
-                self.root.after(0, lambda p=folder_path: self.log(f"[INFO] 没有 webp 文件: {p}"))
+            if not supported_files:
+                self.root.after(0, lambda p=folder_path: self.log(f"[INFO] 没有 webp/gif 文件: {p}"))
                 continue
 
-            for webp_file in webp_files:
+            for webp_file in supported_files:
                 file_ok = True
 
                 if do_gif:
@@ -281,7 +282,7 @@ class ConverterApp:
                     try:
                         output_dir = dir_path / "frames"
                         sub_dir = output_dir / webp_file.stem
-                        n_frames, resize_note = extract_webp_frames(str(webp_file), str(sub_dir))
+                        n_frames, resize_note = extract_frames(str(webp_file), str(sub_dir))
                         self.root.after(0, lambda f=webp_file.name, n=n_frames: self.log(f"[SPLIT] {f} -> {n} 帧"))
                         if resize_note:
                             self.root.after(0, lambda msg=resize_note: self.log_red(msg))
