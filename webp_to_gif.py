@@ -137,7 +137,7 @@ def extract_frames(input_path: str, output_dir: str) -> tuple[int, str | None]:
 class ConverterApp:
     def __init__(self, root: tk.Tk, initial_paths: list[str] = None):
         self.root = root
-        self.root.title("WebP/GIF 转换器")
+        self.root.title("webp转换工具")
         self.root.geometry("600x400")
         self.root.minsize(500, 300)
 
