@@ -1,1 +1,7 @@
 dist/
+build/
+.venv/
+WebpToGif_Tool/
+发布/
+__pycache__/
+*.pyc

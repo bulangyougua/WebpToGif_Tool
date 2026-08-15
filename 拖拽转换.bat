@@ -11,21 +11,30 @@ if "%~1"=="" (
 echo [ARGS] %*
 echo [DIR] %~dp0
 
+:: 优先使用同目录下的打包 exe，无需 Python 环境
+if exist "%~dp0WebP_GIF_Converter.exe" (
+    echo [MODE] using bundled exe
+    "%~dp0WebP_GIF_Converter.exe" %*
+    goto :done
+)
+
+:: 回退：使用 python 运行脚本
 where python >nul 2>nul
 if errorlevel 1 (
-    echo [ERROR] python not found. Install Python and add it to PATH.
+    echo [ERROR] WebP_GIF_Converter.exe not found and python not found.
+    echo Install Python and add it to PATH, or place WebP_GIF_Converter.exe next to this bat.
     pause
     exit /b
 )
 
-echo [PYTHON]
-python -c "import sys; print(sys.executable)"
-echo.
-
+echo [MODE] using python
 python "%~dp0webp_to_gif.py" %*
+goto :done
+
+:done
 if errorlevel 1 (
-    echo [ERROR] Python script failed
+    echo [ERROR] Conversion failed
 ) else (
-    echo [OK] Python script finished
+    echo [OK] Finished
 )
 pause
