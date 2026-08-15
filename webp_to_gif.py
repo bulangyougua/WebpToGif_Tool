@@ -1,20 +1,33 @@
 #!/usr/bin/env python3
 """
 WebP/GIF Converter
-带图形界面，支持双击运行和拖拽文件夹
+带图形界面，支持双击运行和拖拽文件/文件夹
 支持 WebP 和 GIF 格式的转换与帧提取
+
+功能：
+- 拖入文件或文件夹进入等待区，或点击「选择文件 / 选择文件夹」加入等待区
+- 点击「开始转换」统一处理等待区内的所有内容
+- 可指定输出路径，优先级：指定路径 > 原文件所在路径 > 桌面
 """
 
 import sys
 import threading
+import ctypes
 from pathlib import Path
 from PIL import Image
 
 import tkinter as tk
-from tkinter import filedialog, scrolledtext, messagebox
+from tkinter import filedialog, scrolledtext, messagebox, ttk
+
+# 拖放支持：tkinterdnd2 是最可靠的 Tk 拖放库
+try:
+    from tkinterdnd2 import TkinterDnD, DND_FILES
+    _TKDND_AVAILABLE = True
+except Exception:
+    _TKDND_AVAILABLE = False
 
 MAX_SIZE = 1024
-VERSION = "V1.2.0"
+VERSION = "V1.3.0"
 
 
 def resize_if_needed(img: Image.Image) -> tuple[Image.Image, str | None]:
@@ -134,67 +147,285 @@ def extract_frames(input_path: str, output_dir: str) -> tuple[int, str | None]:
     return n_frames, resize_note
 
 
+def resolve_output_root(base_dir: Path, custom_output: str) -> Path:
+    """根据优先级解析输出根目录：
+    1) 指定输出路径（非空且可写目录）
+    2) 原文件所在路径
+    3) 桌面
+    """
+    if custom_output and custom_output.strip():
+        p = Path(custom_output.strip())
+        if p.is_dir():
+            return p
+        # 用户给的路径可能是带文件名的，尽量取父目录
+        try:
+            if not p.exists():
+                p.mkdir(parents=True, exist_ok=True)
+                return p
+        except Exception:
+            pass
+    # 原路径
+    if base_dir and base_dir.is_dir():
+        return base_dir
+    # 桌面
+    desktop = Path.home() / "Desktop"
+    if not desktop.is_dir():
+        desktop = Path.home()
+    return desktop
+
+
 class ConverterApp:
     def __init__(self, root: tk.Tk, initial_paths: list[str] = None):
         self.root = root
         self.root.title("webp转换工具")
-        self.root.geometry("600x400")
-        self.root.minsize(500, 300)
+        self.root.geometry("720x540")
+        self.root.minsize(560, 420)
 
-        self.label = tk.Label(root, text="选择一个或多个文件夹，转换其中的 webp/gif 文件", font=("Microsoft YaHei", 11))
-        self.label.pack(pady=10)
+        # 等待区列表（每个元素是 (路径, 是否为文件夹)）
+        self.queue: list[tuple[str, bool]] = []
+        self.converting = False
 
-        self.btn_frame = tk.Frame(root)
-        self.btn_frame.pack(pady=5)
+        self._build_ui()
 
-        self.select_btn = tk.Button(self.btn_frame, text="选择文件夹", command=self.select_folders, font=("Microsoft YaHei", 10))
-        self.select_btn.pack(side=tk.LEFT, padx=5)
+        # 命令行传入的路径进入等待区（不自动开始）
+        self.initial_paths = initial_paths or []
+        if self.initial_paths:
+            for p in self.initial_paths:
+                self._enqueue_path(p)
+            self.log(f"已从命令行添加 {len(self.initial_paths)} 个路径到等待区，点击「开始转换」处理")
 
-        self.option_frame = tk.Frame(root)
-        self.option_frame.pack(pady=5)
+        if not _TKDND_AVAILABLE:
+            self.log("[WARN] 未安装 tkinterdnd2，拖放不可用，请用点击空白处选择")
+
+    # -------------------------- UI 构建 --------------------------
+    def _build_ui(self) -> None:
+        # 顶部说明
+        tk.Label(
+            self.root,
+            text="拖入文件或文件夹到下方等待区，或点击「选择」添加；设置输出路径后点击「开始转换」",
+            font=("Microsoft YaHei", 11),
+        ).pack(pady=8)
+
+        # 工具按钮区
+        btn_frame = tk.Frame(self.root)
+        btn_frame.pack(pady=4)
+
+        tk.Button(btn_frame, text="清空等待区", command=self.clear_queue, font=("Microsoft YaHei", 10)).pack(side=tk.LEFT, padx=5)
+
+        # 等待区
+        queue_frame = tk.Frame(self.root)
+        queue_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        tk.Label(queue_frame, text="等待区（点击空白处选择文件，或直接拖拽文件/文件夹）：", anchor=tk.W, font=("Microsoft YaHei", 10)).pack(anchor=tk.W)
+
+        list_frame = tk.Frame(queue_frame)
+        list_frame.pack(fill=tk.BOTH, expand=True)
+
+        self.queue_list = tk.Listbox(list_frame, selectmode=tk.EXTENDED, font=("Microsoft YaHei", 9))
+        self.queue_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.queue_list.bind("<Button-1>", self._on_queue_click)
+        self.queue_list.bind("<Delete>", lambda e: self.remove_selected())
+
+        # 注册拖放目标（tkinterdnd2）
+        if _TKDND_AVAILABLE:
+            self.queue_list.drop_target_register(DND_FILES)
+            self.queue_list.dnd_bind("<<Drop>>", self._on_dnd_drop)
+
+        scrollbar = tk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.queue_list.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.queue_list.config(yscrollcommand=scrollbar.set)
+
+        # 输出路径
+        out_frame = tk.Frame(self.root)
+        out_frame.pack(fill=tk.X, padx=10, pady=5)
+
+        tk.Label(out_frame, text="输出路径（留空=原路径，再退回桌面）：", font=("Microsoft YaHei", 10)).pack(side=tk.LEFT)
+        self.out_var = tk.StringVar()
+        out_entry = tk.Entry(out_frame, textvariable=self.out_var, font=("Microsoft YaHei", 9))
+        out_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        tk.Button(out_frame, text="浏览", command=self.browse_output, font=("Microsoft YaHei", 10)).pack(side=tk.LEFT)
+
+        # 转换选项
+        option_frame = tk.Frame(self.root)
+        option_frame.pack(pady=4)
 
         self.gif_var = tk.BooleanVar(value=True)
-        self.gif_cb = tk.Checkbutton(
-            self.option_frame, text="转换为 GIF", variable=self.gif_var,
-            font=("Microsoft YaHei", 10),
-        )
-        self.gif_cb.pack(side=tk.LEFT, padx=10)
+        tk.Checkbutton(option_frame, text="转换为 GIF", variable=self.gif_var, font=("Microsoft YaHei", 10)).pack(side=tk.LEFT, padx=8)
 
         self.png_var = tk.BooleanVar(value=False)
-        self.png_cb = tk.Checkbutton(
-            self.option_frame, text="转换为 PNG（动图只取第一帧）", variable=self.png_var,
-            font=("Microsoft YaHei", 10),
-        )
-        self.png_cb.pack(side=tk.LEFT, padx=10)
+        tk.Checkbutton(option_frame, text="转换为 PNG（动图只取第一帧）", variable=self.png_var, font=("Microsoft YaHei", 10)).pack(side=tk.LEFT, padx=8)
 
         self.split_var = tk.BooleanVar(value=False)
-        self.split_cb = tk.Checkbutton(
-            self.option_frame, text="拆分帧（提取动图每一帧）", variable=self.split_var,
-            font=("Microsoft YaHei", 10),
-        )
-        self.split_cb.pack(side=tk.LEFT, padx=10)
+        tk.Checkbutton(option_frame, text="拆分帧（提取动图每一帧）", variable=self.split_var, font=("Microsoft YaHei", 10)).pack(side=tk.LEFT, padx=8)
 
-        self.bottom_frame = tk.Frame(root)
-        self.bottom_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=5)
+        # 开始按钮
+        action_frame = tk.Frame(self.root)
+        action_frame.pack(pady=6)
+        self.start_btn = tk.Button(action_frame, text="开始转换", command=self.start_conversion, width=18, height=1, font=("Microsoft YaHei", 11), bg="#4CAF50", fg="white")
+        self.start_btn.pack()
 
-        self.status_label = tk.Label(self.bottom_frame, text="就绪", anchor=tk.W, font=("Microsoft YaHei", 9))
-        self.status_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
-
-        self.version_label = tk.Label(
-            self.bottom_frame,
-            text=f"{VERSION} | Author: Leooo",
-            anchor=tk.E,
-            font=("Microsoft YaHei", 9),
-            fg="#800080",
-        )
-        self.version_label.pack(side=tk.RIGHT)
-
-        self.log_area = scrolledtext.ScrolledText(root, state=tk.DISABLED, wrap=tk.WORD, font=("Microsoft YaHei", 9))
+        # 日志区
+        self.log_area = scrolledtext.ScrolledText(self.root, state=tk.DISABLED, wrap=tk.WORD, font=("Microsoft YaHei", 9))
         self.log_area.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         self.log_area.tag_config("resize", foreground="red")
 
-        self.initial_paths = initial_paths or []
+        # 底部状态
+        bottom_frame = tk.Frame(self.root)
+        bottom_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=4)
 
+        self.status_label = tk.Label(bottom_frame, text="就绪", anchor=tk.W, font=("Microsoft YaHei", 9))
+        self.status_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        tk.Label(
+            bottom_frame, text=f"{VERSION} | Author: Leooo", anchor=tk.E,
+            font=("Microsoft YaHei", 9), fg="#800080",
+        ).pack(side=tk.RIGHT)
+
+    # -------------------------- 等待区操作 --------------------------
+    def _enqueue_path(self, raw_path: str) -> None:
+        """把单个路径（文件或文件夹）加入等待区，去重"""
+        p = raw_path.strip().strip('"')
+        if not p:
+            return
+        path = Path(p)
+        key = str(path.resolve())
+        for existing, _ in self.queue:
+            if str(Path(existing).resolve()) == key:
+                return
+        is_dir = path.is_dir()
+        # 若不是文件夹也不是支持的文件，仍允许加入（转换时再判断）
+        self.queue.append((p, is_dir))
+        self._refresh_queue()
+
+    def _refresh_queue(self) -> None:
+        self.queue_list.delete(0, tk.END)
+        for p, is_dir in self.queue:
+            tag = "[文件夹]" if is_dir else "[文件]"
+            self.queue_list.insert(tk.END, f"{tag} {p}")
+
+    def _pick_via_dialog(self) -> None:
+        """点击等待区空白时调用：弹小对话框让用户选「文件夹」或「文件」，
+        再打开对应的选择器。"""
+        win = tk.Toplevel(self.root)
+        win.title("选择")
+        win.transient(self.root)
+        win.grab_set()
+        win.resizable(False, False)
+        # 居中
+        win.update_idletasks()
+        w, h = 260, 90
+        x = self.root.winfo_x() + (self.root.winfo_width() - w) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - h) // 2
+        win.geometry(f"{w}x{h}+{x}+{y}")
+
+        tk.Label(win, text="添加什么到等待区？", font=("Microsoft YaHei", 10)).pack(pady=(14, 6))
+
+        btn_frame = tk.Frame(win)
+        btn_frame.pack(pady=4)
+
+        def pick_folder():
+            win.destroy()
+            folder = filedialog.askdirectory(title="选择文件夹")
+            if folder:
+                self._enqueue_path(folder)
+                self.log(f"已添加文件夹到等待区: {folder}")
+
+        def pick_files():
+            win.destroy()
+            files = filedialog.askopenfilenames(title="选择文件", filetypes=[("图片文件", "*.webp *.gif"), ("所有文件", "*.*")])
+            for f in files:
+                self._enqueue_path(f)
+            if files:
+                self.log(f"已添加 {len(files)} 个文件到等待区")
+
+        tk.Button(btn_frame, text="选择文件夹", command=pick_folder, font=("Microsoft YaHei", 10), width=12).pack(side=tk.LEFT, padx=8)
+        tk.Button(btn_frame, text="选择文件", command=pick_files, font=("Microsoft YaHei", 10), width=12).pack(side=tk.LEFT, padx=8)
+        win.protocol("WM_DELETE_WINDOW", win.destroy)
+
+    def select_files(self) -> None:
+        files = filedialog.askopenfilenames(filetypes=[("图片文件", "*.webp *.gif"), ("所有文件", "*.*")])
+        for f in files:
+            self._enqueue_path(f)
+        if files:
+            self.log(f"已添加 {len(files)} 个文件到等待区")
+
+    def select_folders(self) -> None:
+        folder = filedialog.askdirectory()
+        if folder:
+            self._enqueue_path(folder)
+            self.log(f"已添加文件夹到等待区: {folder}")
+
+    def remove_selected(self) -> None:
+        indices = list(self.queue_list.curselection())
+        if not indices:
+            return
+        for i in sorted(indices, reverse=True):
+            if 0 <= i < len(self.queue):
+                del self.queue[i]
+        self._refresh_queue()
+
+    def clear_queue(self) -> None:
+        self.queue.clear()
+        self._refresh_queue()
+
+    def _on_queue_click(self, event: tk.Event) -> None:
+        """点击等待区：若点击位置没有命中任何项（空白/列表为空），
+        则打开选择对话框（先选文件夹，取消则选文件）。"""
+        nearest = self.queue_list.nearest(event.y)
+        bbox = self.queue_list.bbox(nearest)
+        hit = False
+        if bbox:
+            x1, y1, width, height = bbox
+            if x1 <= event.x <= x1 + width and y1 <= event.y <= y1 + height:
+                hit = True
+        if not hit:
+            self._pick_via_dialog()
+
+    def browse_output(self) -> None:
+        folder = filedialog.askdirectory()
+        if folder:
+            self.out_var.set(folder)
+
+    # -------------------------- 拖放支持 --------------------------
+    def _on_dnd_drop(self, event) -> None:
+        """tkinterdnd2 拖放回调：event.data 是被拖入的路径列表字符串。
+        Windows 下带空格的路径会用花括号包裹，这里做解析。"""
+        raw = event.data or ""
+        # 解析形如 "{C:\path with space} C:\plain\path" 的字符串
+        paths: list[str] = []
+        current = ""
+        in_braces = False
+        for ch in raw:
+            if ch == "{":
+                in_braces = True
+                if current.strip():
+                    paths.append(current.strip())
+                    current = ""
+                continue
+            if ch == "}":
+                in_braces = False
+                paths.append(current)
+                current = ""
+                continue
+            if ch == " " and not in_braces:
+                if current.strip():
+                    paths.append(current.strip())
+                    current = ""
+                continue
+            current += ch
+        if current.strip():
+            paths.append(current.strip())
+
+        added = 0
+        for p in paths:
+            before = len(self.queue)
+            self._enqueue_path(p)
+            if len(self.queue) > before:
+                added += 1
+        if added:
+            self.log(f"拖入并添加 {added} 个路径到等待区")
+
+    # -------------------------- 日志/状态 --------------------------
     def log(self, message: str) -> None:
         self.log_area.configure(state=tk.NORMAL)
         self.log_area.insert(tk.END, message + "\n")
@@ -210,124 +441,122 @@ class ConverterApp:
     def set_status(self, message: str) -> None:
         self.status_label.config(text=message)
 
-    def select_folders(self) -> None:
-        folder = filedialog.askdirectory()
-        if folder:
-            self.process_paths([folder])
+    # -------------------------- 转换流程 --------------------------
+    def start_conversion(self) -> None:
+        if self.converting:
+            return
+        if not self.queue:
+            messagebox.showinfo("提示", "等待区为空，请先拖入或选择文件/文件夹")
+            return
+        if not (self.gif_var.get() or self.png_var.get() or self.split_var.get()):
+            messagebox.showinfo("提示", "请至少选择一种转换方式")
+            return
 
-    def _set_cb_state(self, state: str) -> None:
-        self.gif_cb.config(state=state)
-        self.png_cb.config(state=state)
-        self.split_cb.config(state=state)
-
-    def process_paths(self, paths: list[str]) -> None:
-        self.select_btn.config(state=tk.DISABLED)
-        self._set_cb_state(tk.DISABLED)
-        thread = threading.Thread(target=self._run_conversion, args=(paths,), daemon=True)
+        self.converting = True
+        self.start_btn.config(state=tk.DISABLED, text="转换中...")
+        self.set_status("转换中...")
+        thread = threading.Thread(target=self._run_conversion, daemon=True)
         thread.start()
 
-    def _run_conversion(self, paths: list[str]) -> None:
-        total_success = 0
-        total_fail = 0
+    def _collect_files(self) -> list[Path]:
+        """把等待区里的文件/文件夹展开为具体的 webp/gif 文件列表"""
+        files: list[Path] = []
+        for p, is_dir in self.queue:
+            path = Path(p.strip('"'))
+            if path.is_dir():
+                for f in sorted(path.iterdir()):
+                    if f.is_file() and f.suffix.lower() in (".webp", ".gif"):
+                        files.append(f)
+            elif path.is_file() and path.suffix.lower() in (".webp", ".gif"):
+                files.append(path)
+            else:
+                self.root.after(0, lambda pp=p: self.log(f"[SKIP] 不支持的路径: {pp}"))
+        return files
+
+    def _run_conversion(self) -> None:
+        custom_output = self.out_var.get()
         do_gif = self.gif_var.get()
         do_png = self.png_var.get()
         do_split = self.split_var.get()
 
-        for folder_path in paths:
-            folder_path = folder_path.strip('"')
-            dir_path = Path(folder_path)
+        total_success = 0
+        total_fail = 0
 
-            if not dir_path.is_dir():
-                self.root.after(0, lambda p=folder_path: self.log(f"[SKIP] 不是文件夹: {p}"))
-                continue
+        files = self._collect_files()
+        if not files:
+            self.root.after(0, lambda: self.log("[INFO] 等待区中没有 webp/gif 文件"))
 
-            self.root.after(0, lambda p=folder_path: self.log(f"处理文件夹: {p}"))
+        for src_file in files:
+            src_file = src_file.resolve()
+            dir_path = src_file.parent
 
-            supported_files = sorted(
-                {p.resolve() for p in dir_path.iterdir() if p.is_file() and p.suffix.lower() in (".webp", ".gif")}
-            )
+            # 输出根目录优先级：指定路径 > 原路径 > 桌面
+            out_root = resolve_output_root(dir_path, custom_output)
+            self.root.after(0, lambda f=src_file.name, o=out_root: self.log(f"处理: {f}  ->  输出: {o}"))
 
-            if not supported_files:
-                self.root.after(0, lambda p=folder_path: self.log(f"[INFO] 没有 webp/gif 文件: {p}"))
-                continue
-
-            for webp_file in supported_files:
-                file_ok = True
-
-                if do_gif:
-                    try:
-                        output_dir = dir_path / "newgif"
-                        output_file = output_dir / webp_file.with_suffix(".gif").name
-                        resize_note = convert_webp_to_gif(str(webp_file), str(output_file))
-                        self.root.after(0, lambda f=webp_file.name: self.log(f"[GIF] {f}"))
-                        if resize_note:
-                            self.root.after(0, lambda msg=resize_note: self.log_red(msg))
-                    except Exception as e:
-                        self.root.after(0, lambda f=webp_file.name, err=e: self.log(f"[FAIL-GIF] {f}: {err}"))
-                        file_ok = False
-
-                if do_png:
-                    try:
-                        output_dir = dir_path / "newpng"
-                        output_file = output_dir / webp_file.with_suffix(".png").name
-                        resize_note = convert_webp_to_png(str(webp_file), str(output_file))
-                        self.root.after(0, lambda f=webp_file.name: self.log(f"[PNG] {f}"))
-                        if resize_note:
-                            self.root.after(0, lambda msg=resize_note: self.log_red(msg))
-                    except Exception as e:
-                        self.root.after(0, lambda f=webp_file.name, err=e: self.log(f"[FAIL-PNG] {f}: {err}"))
-                        file_ok = False
-
-                if do_split:
-                    try:
-                        output_dir = dir_path / "frames"
-                        sub_dir = output_dir / webp_file.stem
-                        n_frames, resize_note = extract_frames(str(webp_file), str(sub_dir))
-                        self.root.after(0, lambda f=webp_file.name, n=n_frames: self.log(f"[SPLIT] {f} -> {n} 帧"))
-                        if resize_note:
-                            self.root.after(0, lambda msg=resize_note: self.log_red(msg))
-                    except Exception as e:
-                        self.root.after(0, lambda f=webp_file.name, err=e: self.log(f"[FAIL-SPLIT] {f}: {err}"))
-                        file_ok = False
-
-                if file_ok:
-                    total_success += 1
-                else:
-                    total_fail += 1
+            file_ok = True
 
             if do_gif:
-                self.root.after(0, lambda p=dir_path / "newgif": self.log(f"[INFO] GIF 输出: {p}"))
+                try:
+                    output_dir = out_root / "newgif"
+                    output_file = output_dir / src_file.with_suffix(".gif").name
+                    resize_note = convert_webp_to_gif(str(src_file), str(output_file))
+                    self.root.after(0, lambda f=src_file.name: self.log(f"[GIF] {f}"))
+                    if resize_note:
+                        self.root.after(0, lambda msg=resize_note: self.log_red(msg))
+                except Exception as e:
+                    self.root.after(0, lambda f=src_file.name, err=e: self.log(f"[FAIL-GIF] {f}: {err}"))
+                    file_ok = False
+
             if do_png:
-                self.root.after(0, lambda p=dir_path / "newpng": self.log(f"[INFO] PNG 输出: {p}"))
+                try:
+                    output_dir = out_root / "newpng"
+                    output_file = output_dir / src_file.with_suffix(".png").name
+                    resize_note = convert_webp_to_png(str(src_file), str(output_file))
+                    self.root.after(0, lambda f=src_file.name: self.log(f"[PNG] {f}"))
+                    if resize_note:
+                        self.root.after(0, lambda msg=resize_note: self.log_red(msg))
+                except Exception as e:
+                    self.root.after(0, lambda f=src_file.name, err=e: self.log(f"[FAIL-PNG] {f}: {err}"))
+                    file_ok = False
+
             if do_split:
-                self.root.after(0, lambda p=dir_path / "frames": self.log(f"[INFO] 帧输出: {p}"))
-            self.root.after(0, self.log, "")
+                try:
+                    output_dir = out_root / "frames"
+                    sub_dir = output_dir / src_file.stem
+                    n_frames, resize_note = extract_frames(str(src_file), str(sub_dir))
+                    self.root.after(0, lambda f=src_file.name, n=n_frames: self.log(f"[SPLIT] {f} -> {n} 帧"))
+                    if resize_note:
+                        self.root.after(0, lambda msg=resize_note: self.log_red(msg))
+                except Exception as e:
+                    self.root.after(0, lambda f=src_file.name, err=e: self.log(f"[FAIL-SPLIT] {f}: {err}"))
+                    file_ok = False
 
-        def finish():
-            self.set_status(f"完成：成功 {total_success} 个，失败 {total_fail} 个")
-            self.select_btn.config(state=tk.NORMAL)
-            self._set_cb_state(tk.NORMAL)
-            if total_fail > 0:
-                messagebox.showwarning("转换完成", f"成功 {total_success} 个，失败 {total_fail} 个\n请查看日志了解失败文件")
+            if file_ok:
+                total_success += 1
             else:
-                messagebox.showinfo("转换完成", f"成功 {total_success} 个，失败 {total_fail} 个")
+                total_fail += 1
 
-        self.root.after(0, finish)
+        self.root.after(0, self._finish_conversion, total_success, total_fail)
 
-    def run_initial(self) -> None:
-        if self.initial_paths:
-            self.process_paths(self.initial_paths)
+    def _finish_conversion(self, total_success: int, total_fail: int) -> None:
+        self.converting = False
+        self.start_btn.config(state=tk.NORMAL, text="开始转换")
+        self.set_status(f"完成：成功 {total_success} 个，失败 {total_fail} 个")
+        if total_fail > 0:
+            messagebox.showwarning("转换完成", f"成功 {total_success} 个，失败 {total_fail} 个\n请查看日志了解失败文件")
+        else:
+            messagebox.showinfo("转换完成", f"成功 {total_success} 个，失败 {total_fail} 个")
 
 
 def main():
     initial_paths = [arg.strip('"') for arg in sys.argv[1:] if arg.strip('"')]
 
-    root = tk.Tk()
+    if _TKDND_AVAILABLE:
+        root = TkinterDnD.Tk()
+    else:
+        root = tk.Tk()
     app = ConverterApp(root, initial_paths=initial_paths)
-
-    if initial_paths:
-        root.after(100, app.run_initial)
-
     root.mainloop()
 
 
