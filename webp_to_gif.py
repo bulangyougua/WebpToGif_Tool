@@ -47,6 +47,62 @@ def resize_if_needed(img: Image.Image) -> tuple[Image.Image, str | None]:
     return img.resize((new_width, new_height), Image.LANCZOS), message
 
 
+def _prepare_gif_frame(
+    frame: Image.Image, bg_color: tuple[int, int, int] | None = None
+) -> tuple[Image.Image, int | None]:
+    """将 RGBA 帧转换为 GIF 可用的调色板模式，并保留完全透明像素。
+
+    问题背景：直接 ``convert('RGBA').convert('P', palette=ADAPTIVE)`` 会丢掉 alpha，
+    导致原本透明的区域被填充成黑色或白色，转换后的 GIF 出现黑边/白边。
+
+    这里采用的处理方式：
+    - 完全不透明的帧：正常量化为 256 色调色板。
+    - 带透明的帧：预留一个调色板索引给透明色，alpha < 128 的像素标记为透明。
+    - 如果传入 ``bg_color``，则先把半透明像素合成到该背景色上（适合需要固定背景时）。
+
+    返回 (palette_image, transparent_index)，没有透明区域时 transparent_index 为 None。
+    """
+    if frame.mode != "RGBA":
+        frame = frame.convert("RGBA")
+
+    alpha = frame.getchannel("A")
+    min_a, max_a = alpha.getextrema()
+    if min_a == 255:
+        # 没有透明像素，直接量化
+        return frame.convert("RGB").convert("P", palette=Image.ADAPTIVE, colors=256), None
+
+    # 处理半透明/透明像素
+    if bg_color is not None:
+        bg = Image.new("RGBA", frame.size, (*bg_color, 255))
+        rgb = Image.alpha_composite(bg, frame).convert("RGB")
+    else:
+        # 不额外加背景，直接丢弃 alpha，后面把透明像素统一标为透明索引
+        rgb = frame.convert("RGB")
+
+    # 预留索引 255 给透明色
+    quantized = rgb.convert("P", palette=Image.ADAPTIVE, colors=255)
+    transparent_index = 255
+    transparent_mask = alpha.point(lambda a: 255 if a < 128 else 0, mode="1")
+
+    if transparent_mask.getbbox() is not None:
+        transparent_fill = Image.new("P", frame.size, transparent_index)
+        quantized.paste(transparent_fill, (0, 0), transparent_mask)
+
+        palette = quantized.getpalette()
+        if palette is None:
+            palette = []
+        # 补齐到 256 色调色板长度
+        if len(palette) < 768:
+            palette.extend([0] * (768 - len(palette)))
+        palette[transparent_index * 3 : transparent_index * 3 + 3] = (
+            list(bg_color) if bg_color is not None else [255, 255, 255]
+        )
+        quantized.putpalette(palette)
+        quantized.info["transparency"] = transparent_index
+
+    return quantized, transparent_index
+
+
 def convert_webp_to_gif(input_path: str, output_path: str) -> str | None:
     """将单个 WebP 文件转换为 GIF，若发生缩放则返回说明文字"""
     output_file = Path(output_path)
@@ -60,33 +116,48 @@ def convert_webp_to_gif(input_path: str, output_path: str) -> str | None:
         if is_animated and n_frames > 1:
             frames = []
             durations = []
+            transparency_used = False
 
             for frame_idx in range(n_frames):
                 img.seek(frame_idx)
                 frame, note = resize_if_needed(img.convert("RGBA"))
                 if note:
                     resize_note = note
-                frame = frame.convert("P", palette=Image.ADAPTIVE, colors=256)
+                frame, t_idx = _prepare_gif_frame(frame)
+                if t_idx is not None:
+                    transparency_used = True
                 frames.append(frame)
                 duration = img.info.get("duration", 100)
                 durations.append(duration)
 
-            frames[0].save(
-                output_file,
-                save_all=True,
-                append_images=frames[1:],
-                duration=durations,
-                loop=img.info.get("loop", 0),
-                optimize=True,
-            )
+            save_kwargs = {
+                "save_all": True,
+                "append_images": frames[1:],
+                "duration": durations,
+                "loop": img.info.get("loop", 0),
+                "optimize": True,
+            }
+            if transparency_used:
+                # 透明帧需要 disposal=2，否则下一帧会透过透明区域显示上一帧
+                save_kwargs["disposal"] = 2
+
+            frames[0].save(output_file, **save_kwargs)
         else:
+            t_idx = None
             if img.mode in ("RGBA", "P"):
-                img, resize_note = resize_if_needed(img.convert("RGBA"))
-                img = img.convert("P", palette=Image.ADAPTIVE, colors=256)
+                rgba, note = resize_if_needed(img.convert("RGBA"))
+                if note:
+                    resize_note = note
+                img, t_idx = _prepare_gif_frame(rgba)
             elif img.mode != "P":
                 img, resize_note = resize_if_needed(img.convert("RGB"))
+                img = img.convert("P", palette=Image.ADAPTIVE, colors=256)
+            else:
+                img, resize_note = resize_if_needed(img)
+                img = img.convert("P", palette=Image.ADAPTIVE, colors=256)
 
-            img.save(output_file, "GIF", optimize=True)
+            save_kwargs = {"optimize": True}
+            img.save(output_file, "GIF", **save_kwargs)
 
     return resize_note
 

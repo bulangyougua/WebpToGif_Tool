@@ -1,11 +1,18 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
+import tkinterdnd2
 
+_tkdnd_dir = os.path.dirname(tkinterdnd2.__file__)
 
 a = Analysis(
     ['webp_to_gif.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[
+        (os.path.join(_tkdnd_dir, 'tkdnd'), os.path.join('tkinterdnd2', 'tkdnd')),
+        (os.path.join(_tkdnd_dir, 'TkinterDnD.py'), 'tkinterdnd2'),
+        (os.path.join(_tkdnd_dir, '__init__.py'), 'tkinterdnd2'),
+    ],
     hiddenimports=['tkinterdnd2'],
     hookspath=[],
     hooksconfig={},
