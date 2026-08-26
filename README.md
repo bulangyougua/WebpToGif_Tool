@@ -1,50 +1,24 @@
-# WebP to GIF 转换工具
+# WebP 转换工具
 
-简单的 Python 工具，将 WebP 图片（支持动画）转换为 GIF 格式。
+WebP/GIF 图片格式转换工具，支持拖拽操作。
 
-## 安装依赖
+## 功能
 
-```bash
-pip install Pillow
-```
+- **转换为 GIF** - 支持静态/动画 WebP，保留帧率和循环
+- **转换为 PNG** - 动图只取第一帧，大图自动缩小并保留原图
+- **拆分帧** - 提取动图每一帧为单独 PNG
+- **拖拽支持** - 可直接拖拽文件/文件夹到窗口
+- **批量处理** - 支持同时处理多个文件
 
 ## 使用方法
 
-### 1. 转换单个文件（同目录输出）
+1. 双击运行 `webp转换工具.exe`
+2. 拖拽文件或文件夹到等待区
+3. 勾选需要的转换格式
+4. 点击「开始转换」
+
+## 安装依赖（源码运行）
 
 ```bash
-python webp_to_gif.py 图片.webp
+pip install Pillow tkinterdnd2
 ```
-
-### 2. 指定输出文件路径
-
-```bash
-python webp_to_gif.py -o 输出.gif 图片.webp
-```
-
-### 3. 指定输出目录
-
-```bash
-python webp_to_gif.py -d C:\Users\14439\Desktop\res 图片.webp
-```
-
-### 4. 批量转换目录到指定输出目录
-
-```bash
-python webp_to_gif.py -d C:\Users\14439\Desktop\res 文件夹路径
-```
-
-### 5. 拖拽转换（Windows）
-
-直接将 `.webp` 文件或文件夹拖拽到 `拖拽转换.bat` 上，自动保存到 `C:\Users\14439\Desktop\res`。
-
-如需修改输出目录，用文本编辑器打开 `拖拽转换.bat`，修改第一行的 `OUTPUT_DIR` 变量。
-
-## 功能特点
-
-- 支持静态 WebP 转 GIF
-- 支持动画 WebP 转动画 GIF（保留帧率和循环设置）
-- 支持透明通道
-- 支持批量转换
-- 自动调色板优化
-- 支持自定义输出目录

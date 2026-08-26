@@ -5,7 +5,7 @@ a = Analysis(
     ['webp_to_gif.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('webp_converter_icon.ico', '.')],
     hiddenimports=['tkinterdnd2'],
     hookspath=[],
     hooksconfig={},
