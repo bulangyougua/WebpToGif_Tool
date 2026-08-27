@@ -27,7 +27,7 @@ except Exception:
     _TKDND_AVAILABLE = False
 
 MAX_SIZE = 1024
-VERSION = "V1.3.0"
+VERSION = "V2.1.0"
 
 
 def resize_if_needed(img: Image.Image) -> tuple[Image.Image, str | None]:
@@ -163,7 +163,7 @@ def convert_webp_to_gif(input_path: str, output_path: str) -> str | None:
 
 
 def convert_webp_to_png(input_path: str, output_path: str) -> str | None:
-    """将单个 WebP 文件转换为 PNG，若发生缩放则返回说明文字"""
+    """将单个 WebP 文件转换为 PNG，若发生缩放则保存两个版本（原始大小和缩小版）并返回说明文字"""
     output_file = Path(output_path)
     output_file.parent.mkdir(parents=True, exist_ok=True)
     resize_note = None
@@ -175,26 +175,49 @@ def convert_webp_to_png(input_path: str, output_path: str) -> str | None:
         if is_animated and n_frames > 1:
             # 动图只取第一帧转为 PNG
             img.seek(0)
-            frame, note = resize_if_needed(img.convert("RGBA"))
+            original_frame = img.convert("RGBA")
+            resized_frame, note = resize_if_needed(original_frame)
             if note:
                 resize_note = note
-            frame.save(output_file, "PNG")
+                # 保存原始大小版本
+                original_frame.save(output_file, "PNG")
+                # 保存缩小版本
+                resized_file = output_file.parent / f"{output_file.stem}_resized{output_file.suffix}"
+                resized_frame.save(resized_file, "PNG")
+                resize_note = f"  已保存两个版本：原始大小 ({original_frame.size[0]}x{original_frame.size[1]}) 和缩小版 ({resized_frame.size[0]}x{resized_frame.size[1]})"
+            else:
+                # 不需要缩小，只保存一个版本
+                original_frame.save(output_file, "PNG")
         else:
             if img.mode in ("RGBA", "P"):
-                img, resize_note = resize_if_needed(img.convert("RGBA"))
+                original_img = img.convert("RGBA")
             else:
-                img, resize_note = resize_if_needed(img.convert("RGB"))
-            img.save(output_file, "PNG")
+                original_img = img.convert("RGB")
+            
+            resized_img, note = resize_if_needed(original_img)
+            if note:
+                resize_note = note
+                # 保存原始大小版本
+                original_img.save(output_file, "PNG")
+                # 保存缩小版本
+                resized_file = output_file.parent / f"{output_file.stem}_resized{output_file.suffix}"
+                resized_img.save(resized_file, "PNG")
+                resize_note = f"  已保存两个版本：原始大小 ({original_img.size[0]}x{original_img.size[1]}) 和缩小版 ({resized_img.size[0]}x{resized_img.size[1]})"
+            else:
+                # 不需要缩小，只保存一个版本
+                original_img.save(output_file, "PNG")
 
     return resize_note
 
 
 def extract_frames(input_path: str, output_dir: str) -> tuple[int, str | None]:
-    """将动图（WebP 或 GIF）的每一帧提取为单独的 PNG 文件，返回 (帧数, 缩放说明)"""
+    """将动图（WebP 或 GIF）的每一帧提取为单独的 PNG 文件，返回 (帧数, 缩放说明)
+    若发生缩放，同时保存原始大小和缩小两个版本"""
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     resize_note = None
     stem = Path(input_path).stem
+    resized_saved = False
 
     with Image.open(input_path) as img:
         is_animated = getattr(img, "is_animated", False)
@@ -202,19 +225,37 @@ def extract_frames(input_path: str, output_dir: str) -> tuple[int, str | None]:
 
         if not is_animated or n_frames <= 1:
             # 静态图直接保存一帧
-            frame, note = resize_if_needed(img.convert("RGBA"))
+            original_frame = img.convert("RGBA")
+            resized_frame, note = resize_if_needed(original_frame)
             if note:
                 resize_note = note
-            frame.save(out_dir / f"{stem}_001.png", "PNG")
+                # 保存原始大小版本
+                original_frame.save(out_dir / f"{stem}_001.png", "PNG")
+                # 保存缩小版本
+                resized_frame.save(out_dir / f"{stem}_001_resized.png", "PNG")
+                resized_saved = True
+            else:
+                original_frame.save(out_dir / f"{stem}_001.png", "PNG")
+            if resized_saved:
+                resize_note = f"  已保存两个版本：原始大小和缩小版（文件名含 _resized 后缀）"
             return 1, resize_note
 
         for frame_idx in range(n_frames):
             img.seek(frame_idx)
-            frame, note = resize_if_needed(img.convert("RGBA"))
+            original_frame = img.convert("RGBA")
+            resized_frame, note = resize_if_needed(original_frame)
             if note:
                 resize_note = note
-            frame.save(out_dir / f"{stem}_{frame_idx + 1:03d}.png", "PNG")
+                # 保存原始大小版本
+                original_frame.save(out_dir / f"{stem}_{frame_idx + 1:03d}.png", "PNG")
+                # 保存缩小版本
+                resized_frame.save(out_dir / f"{stem}_{frame_idx + 1:03d}_resized.png", "PNG")
+                resized_saved = True
+            else:
+                original_frame.save(out_dir / f"{stem}_{frame_idx + 1:03d}.png", "PNG")
 
+    if resized_saved:
+        resize_note = f"  已保存两个版本：原始大小和缩小版（文件名含 _resized 后缀）"
     return n_frames, resize_note
 
 
@@ -248,9 +289,18 @@ def resolve_output_root(base_dir: Path, custom_output: str) -> Path:
 class ConverterApp:
     def __init__(self, root: tk.Tk, initial_paths: list[str] = None):
         self.root = root
-        self.root.title("webp转换工具")
+        self.root.title(f"webp转换工具 {VERSION} | Author: Leooo")
         self.root.geometry("720x540")
         self.root.minsize(560, 420)
+        
+        # 设置窗口图标（兼容 PyInstaller 打包）
+        base_dir = Path(getattr(sys, '_MEIPASS', Path(__file__).parent))
+        icon_path = base_dir / "webp_converter_icon.ico"
+        if icon_path.exists():
+            try:
+                self.root.iconbitmap(str(icon_path))
+            except Exception:
+                pass
 
         # 等待区列表（每个元素是 (路径, 是否为文件夹)）
         self.queue: list[tuple[str, bool]] = []
@@ -297,10 +347,10 @@ class ConverterApp:
         self.queue_list.bind("<Button-1>", self._on_queue_click)
         self.queue_list.bind("<Delete>", lambda e: self.remove_selected())
 
-        # 注册拖放目标（tkinterdnd2）
+        # 注册拖放目标（tkinterdnd2）- 注册到整个窗口，方便拖入
         if _TKDND_AVAILABLE:
-            self.queue_list.drop_target_register(DND_FILES)
-            self.queue_list.dnd_bind("<<Drop>>", self._on_dnd_drop)
+            self.root.drop_target_register(DND_FILES)
+            self.root.dnd_bind("<<Drop>>", self._on_dnd_drop)
 
         scrollbar = tk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.queue_list.yview)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -348,7 +398,7 @@ class ConverterApp:
         self.status_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         tk.Label(
-            bottom_frame, text=f"{VERSION} | Author: Leooo", anchor=tk.E,
+            bottom_frame, text="Author: Leooo", anchor=tk.E,
             font=("Microsoft YaHei", 9), fg="#800080",
         ).pack(side=tk.RIGHT)
 

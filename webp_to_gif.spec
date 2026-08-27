@@ -12,6 +12,7 @@ a = Analysis(
         (os.path.join(_tkdnd_dir, 'tkdnd'), os.path.join('tkinterdnd2', 'tkdnd')),
         (os.path.join(_tkdnd_dir, 'TkinterDnD.py'), 'tkinterdnd2'),
         (os.path.join(_tkdnd_dir, '__init__.py'), 'tkinterdnd2'),
+        ('webp_converter_icon.ico', '.'),
     ],
     hiddenimports=['tkinterdnd2'],
     hookspath=[],
